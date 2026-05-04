@@ -5,13 +5,12 @@ Usage:
     python scripts/deploy.py R2
 
 Reads:
-    inventory/devices.yaml   - which devices and how to reach them
-    configs/<device>.yaml    - desired configuration for the device
-    .env                     - credentials (not in git)
+    inventory/devices.yaml
+    configs/<device>.yaml
+    .env (credentials)
 
-Pattern:
-    lock -> discard -> edit -> validate -> commit -> unlock
-    With discard-changes on any error.
+Pattern: lock -> discard -> edit -> validate -> commit -> unlock
+         with discard-changes on error.
 """
 import argparse
 import os
@@ -32,6 +31,7 @@ USERNAME = os.environ["ROUTER_USERNAME"]
 PASSWORD = os.environ["ROUTER_PASSWORD"]
 
 NS_NATIVE = "http://cisco.com/ns/yang/Cisco-IOS-XE-native"
+NS_OSPF = "http://cisco.com/ns/yang/Cisco-IOS-XE-ospf"
 NS_NC = "urn:ietf:params:xml:ns:netconf:base:1.0"
 
 
@@ -40,48 +40,37 @@ def load_yaml(path):
         return yaml.safe_load(f)
 
 
-def build_payload(cfg):
-    """Construct the full <config> XML payload from a config dict.
+def add_hostname(native, hostname):
+    h = etree.SubElement(native, "hostname")
+    h.text = hostname
+    h.set(f"{{{NS_NC}}}operation", "merge")
 
-    We bouwen de XML programmatisch met lxml in plaats van strings te
-    interpoleren — robuuster, geen escaping-problemen, en dichter bij
-    hoe je later naar templating zou groeien.
-    """
-    nsmap = {None: NS_NATIVE, "nc": NS_NC}
-    config = etree.Element("config")
-    native = etree.SubElement(config, "native", nsmap=nsmap)
 
-    # Hostname
-    if "hostname" in cfg:
-        h = etree.SubElement(native, "hostname")
-        h.text = cfg["hostname"]
-        h.set(f"{{{NS_NC}}}operation", "merge")
+def add_interfaces(native, interfaces, loopbacks):
+    """Build <interface> wrapper with all GigabitEthernet + Loopback children."""
+    if not interfaces and not loopbacks:
+        return
+    wrapper = etree.SubElement(native, "interface")
 
-    # Physical + loopback interfaces under a single <interface> wrapper
-    interface_wrapper = etree.SubElement(native, "interface")
-
-    for intf in cfg.get("interfaces", []):
-        gi = etree.SubElement(interface_wrapper, "GigabitEthernet")
+    for intf in interfaces or []:
+        gi = etree.SubElement(wrapper, "GigabitEthernet")
         gi.set(f"{{{NS_NC}}}operation", "merge")
         etree.SubElement(gi, "name").text = intf["name"]
         if "description" in intf:
             etree.SubElement(gi, "description").text = intf["description"]
-        # IP address: native -> ip -> address -> primary -> address+mask
         ip = etree.SubElement(gi, "ip")
         addr = etree.SubElement(ip, "address")
         primary = etree.SubElement(addr, "primary")
         etree.SubElement(primary, "address").text = intf["ip"]
         etree.SubElement(primary, "mask").text = intf["mask"]
-        # enabled=true means: ensure no shutdown. We model 'enabled: false'
-        # by adding <shutdown/>, and 'enabled: true' by removing it.
         if intf.get("enabled", True):
             shut = etree.SubElement(gi, "shutdown")
             shut.set(f"{{{NS_NC}}}operation", "remove")
         else:
             etree.SubElement(gi, "shutdown")
 
-    for lo in cfg.get("loopbacks", []):
-        lb = etree.SubElement(interface_wrapper, "Loopback")
+    for lo in loopbacks or []:
+        lb = etree.SubElement(wrapper, "Loopback")
         lb.set(f"{{{NS_NC}}}operation", "merge")
         etree.SubElement(lb, "name").text = lo["name"]
         ip = etree.SubElement(lb, "ip")
@@ -90,28 +79,48 @@ def build_payload(cfg):
         etree.SubElement(primary, "address").text = lo["ip"]
         etree.SubElement(primary, "mask").text = lo["mask"]
 
-    # OSPF — augmenting module: Cisco-IOS-XE-ospf
-    if "ospf" in cfg:
-        ospf_cfg = cfg["ospf"]
-        # router subcontainer onder native, met augment-namespace voor 'router'
-        router = etree.SubElement(native, "router")
-        ospf = etree.SubElement(
-            router, "{http://cisco.com/ns/yang/Cisco-IOS-XE-ospf}router-ospf"
-        )
-        ospf.set(f"{{{NS_NC}}}operation", "merge")
-        ospf_proc = etree.SubElement(ospf, "ospf")
-        proc = etree.SubElement(ospf_proc, "process-id-list")
-        etree.SubElement(proc, "id").text = str(ospf_cfg["process_id"])
-        # router-id
-        if "router_id" in ospf_cfg:
-            rid = etree.SubElement(proc, "router-id")
-            rid.text = ospf_cfg["router_id"]
-        # networks
-        for net in ospf_cfg.get("networks", []):
-            n = etree.SubElement(proc, "network")
-            etree.SubElement(n, "ip").text = net["prefix"]
-            etree.SubElement(n, "wildcard").text = net["wildcard"]
-            etree.SubElement(n, "area").text = str(net["area"])
+
+def add_ospf(native, ospf_cfg):
+    """Build OSPF config under <native>/<router>/<router-ospf>/<ospf>/<process-id>.
+
+    Structure (verified via YANG Suite on IOS-XE 17.3):
+        native
+          router
+            router-ospf (ns: Cisco-IOS-XE-ospf)
+              ospf
+                process-id
+                  id          <- key
+                  router-id
+                  network[]   <- list, ip + wildcard + area
+    """
+    router = etree.SubElement(native, "router")
+    router_ospf = etree.SubElement(router, f"{{{NS_OSPF}}}router-ospf")
+    router_ospf.set(f"{{{NS_NC}}}operation", "merge")
+    ospf_container = etree.SubElement(router_ospf, f"{{{NS_OSPF}}}ospf")
+    process = etree.SubElement(ospf_container, f"{{{NS_OSPF}}}process-id")
+    etree.SubElement(process, f"{{{NS_OSPF}}}id").text = str(ospf_cfg["process_id"])
+    if "router_id" in ospf_cfg:
+        etree.SubElement(process, f"{{{NS_OSPF}}}router-id").text = ospf_cfg["router_id"]
+    for net in ospf_cfg.get("networks", []):
+        n = etree.SubElement(process, f"{{{NS_OSPF}}}network")
+        etree.SubElement(n, f"{{{NS_OSPF}}}ip").text = net["prefix"]
+        etree.SubElement(n, f"{{{NS_OSPF}}}wildcard").text = net["wildcard"]
+        etree.SubElement(n, f"{{{NS_OSPF}}}area").text = str(net["area"])
+
+
+def build_payload(cfg):
+    """Construct the full <config> XML payload."""
+    nsmap = {None: NS_NATIVE, "nc": NS_NC}
+    config = etree.Element("config")
+    native = etree.SubElement(config, "native", nsmap=nsmap)
+
+    if "hostname" in cfg:
+        add_hostname(native, cfg["hostname"])
+
+    add_interfaces(native, cfg.get("interfaces"), cfg.get("loopbacks"))
+
+    if "ospf" in cfg and cfg["ospf"]:   # also skips if YAML key has null value
+        add_ospf(native, cfg["ospf"])
 
     return etree.tostring(config, pretty_print=True).decode()
 
