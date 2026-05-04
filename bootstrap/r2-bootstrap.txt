@@ -1,0 +1,46 @@
+! ============================================================
+! R2 minimal bootstrap - paste into console
+! Sets up enough OSPF to be reachable from the laptop via R1.
+! After this, deploy.py R2 will configure the rest.
+!
+! Prerequisite: R1 must already be bootstrapped, and the
+! R1<->R2 link cable must be in place (R1 Gi0/0/1 <-> R2 Gi0/0/1).
+! ============================================================
+
+enable
+configure terminal
+
+hostname R2
+
+interface Loopback0
+ ip address 2.2.2.2 255.255.255.255
+exit
+
+interface GigabitEthernet0/0/1
+ description Link to R1
+ ip address 192.168.12.2 255.255.255.252
+ no shutdown
+exit
+
+username admin privilege 15 secret cisco123
+
+ip domain name lab.local
+crypto key generate rsa modulus 2048
+
+ip ssh version 2
+line vty 0 4
+ login local
+ transport input ssh
+exit
+
+router ospf 1
+ router-id 2.2.2.2
+ network 2.2.2.2 0.0.0.0 area 0
+ network 192.168.12.0 0.0.0.3 area 0
+exit
+
+netconf-yang
+netconf-yang feature candidate-datastore
+
+end
+write memory
