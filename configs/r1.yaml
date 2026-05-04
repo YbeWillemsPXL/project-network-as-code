@@ -1,0 +1,33 @@
+# Gewenste configuratie van R1 (declaratief).
+# Het deploy-script leest dit en bouwt de NETCONF payload.
+
+hostname: R1
+
+interfaces:
+  - name: "0/0/0"
+    description: "Management"
+    ip: "192.168.100.1"
+    mask: "255.255.255.0"
+    enabled: true
+
+  - name: "0/0/1"
+    description: "Link to R2"
+    ip: "192.168.12.1"
+    mask: "255.255.255.252"   # /30 — 2 usable IPs
+    enabled: true
+
+loopbacks:
+  - name: "0"
+    ip: "1.1.1.1"
+    mask: "255.255.255.255"   # /32
+
+# ospf:
+#   process_id: 1
+#   router_id: "1.1.1.1"
+#   networks:
+#     - prefix: "192.168.12.0"
+#       wildcard: "0.0.0.3"
+#       area: 0
+#     - prefix: "1.1.1.1"
+#       wildcard: "0.0.0.0"
+#       area: 0

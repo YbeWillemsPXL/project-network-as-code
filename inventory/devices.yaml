@@ -1,0 +1,12 @@
+# Welke toestellen zijn er en hoe bereiken we ze.
+# Geen wachtwoord/gebruiker hier — die komen uit .env (niet in Git).
+devices:
+  R1:
+    host: 192.168.100.1
+    netconf_port: 830
+    role: edge_router
+
+  R2:
+    host: 192.168.200.1     # tijdelijk: management, totdat OSPF up is
+    netconf_port: 830
+    role: edge_router
