@@ -7,6 +7,6 @@ devices:
     role: edge_router
 
   R2:
-    host: 192.168.200.1     # tijdelijk: management, totdat OSPF up is
+    host: 2.2.2.2     # tijdelijk: management, totdat OSPF up is
     netconf_port: 830
     role: edge_router
