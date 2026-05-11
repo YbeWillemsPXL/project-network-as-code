@@ -1,40 +1,29 @@
-"""Verify operational state of all devices in inventory.
+"""Verify operational state of all devices via RESTCONF.
 
-Reads:
-    inventory/devices.yaml
-    configs/<device>.yaml   - expected state
-    .env                    - credentials
+Each request explicitly logs the HTTP status code so the operator
+sees whether the call succeeded (200), the node was missing (404),
+or something failed (4xx/5xx).
 
-Pulls (read-only) via NETCONF <get> / <get-config>:
-    - Hostname              from native (config)
-    - Interface oper-state  from ietf-interfaces (operational)
-    - OSPF neighbors        from Cisco-IOS-XE-ospf-oper (only routers with ospf cfg)
-    - VLAN database         from native (config) — switches only
-    - Default gateway       from native ip/default-gateway — switches only
-
-Exit code: 0 if all pass, 1 if any fail.
+Exit code: 0 if all checks pass, 1 if any fail.
 """
 import os
 import sys
 from pathlib import Path
 
+import requests
+from requests.auth import HTTPBasicAuth
+import urllib3
 import yaml
 from dotenv import load_dotenv
-from lxml import etree
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib.netconf_client import connect
+# Self-signed cert warnings zijn ruis in lab-context — onderdruk ze.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 USERNAME = os.environ["ROUTER_USERNAME"]
 PASSWORD = os.environ["ROUTER_PASSWORD"]
-
-NS = {
-    "native": "http://cisco.com/ns/yang/Cisco-IOS-XE-native",
-    "if": "urn:ietf:params:xml:ns:yang:ietf-interfaces",
-}
 
 
 def load_yaml(path):
@@ -55,147 +44,151 @@ class CheckResult:
         print(f"  ✗ {msg}")
         self.failed += 1
 
+    def info(self, msg):
+        print(f"  ⊘ {msg}")
+
     @property
     def total(self):
         return self.passed + self.failed
 
 
-def check_hostname(m, expected, results):
-    flt = """
-    <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-      <hostname/>
-    </native>
+def restconf_get(host, path):
+    """RESTCONF GET. Always logs the HTTP status code visibly.
+
+    Returns (status_code, parsed_json or None).
     """
-    reply = m.get_config(source="running", filter=("subtree", flt))
-    root = etree.fromstring(reply.xml.encode())
-    found = root.find(".//native:hostname", namespaces=NS)
-    actual = found.text if found is not None else None
+    url = f"https://{host}/restconf/data/{path}"
+    headers = {"Accept": "application/yang-data+json"}
+    try:
+        r = requests.get(
+            url,
+            auth=HTTPBasicAuth(USERNAME, PASSWORD),
+            headers=headers,
+            verify=False,
+            timeout=10,
+        )
+    except requests.exceptions.RequestException as exc:
+        print(f"  [HTTP ERROR] /{path} → {exc}")
+        return None, None
+
+    print(f"  [HTTP {r.status_code}] GET /{path}")
+
+    if r.status_code == 200:
+        try:
+            return r.status_code, r.json()
+        except ValueError:
+            return r.status_code, None
+    return r.status_code, None
+
+
+# ─────────────────────────────────────────────────────────────
+# Checks
+# ─────────────────────────────────────────────────────────────
+
+def check_hostname(host, expected, results):
+    status, data = restconf_get(host, "Cisco-IOS-XE-native:native/hostname")
+    if status != 200:
+        results.fail(f"hostname: HTTP {status}")
+        return
+    actual = data.get("Cisco-IOS-XE-native:hostname") if data else None
     if actual == expected:
         results.ok(f"hostname = {actual}")
     else:
         results.fail(f"hostname mismatch: expected '{expected}', got '{actual}'")
 
 
-def check_interfaces(m, expected_names, results):
-    """Check oper-status van geconfigureerde interfaces.
+def check_interfaces(host, expected_names, results):
+    status, data = restconf_get(host, "ietf-interfaces:interfaces-state")
+    if status != 200:
+        results.fail(f"interfaces: HTTP {status}")
+        return
 
-    Sub-interfaces (met '.' in de naam) worden niet als failure aangerekend
-    als hun parent fysiek down is (lower-layer-down). Dat is normaal en
-    verwacht gedrag — een sub-interface kan niet up komen zonder carrier
-    op de parent.
-    """
-    flt = """
-    <interfaces-state xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"/>
-    """
-    reply = m.get(filter=("subtree", flt))
-    root = etree.fromstring(reply.xml.encode())
-
-    name_to_status = {}
-    for intf in root.findall(".//if:interface", namespaces=NS):
-        n = intf.findtext("if:name", namespaces=NS)
-        op = intf.findtext("if:oper-status", namespaces=NS)
-        if n:
-            name_to_status[n] = op
+    interfaces = (data or {}).get("ietf-interfaces:interfaces-state", {}).get("interface", [])
+    name_to_status = {i.get("name"): i.get("oper-status") for i in interfaces}
 
     for n in expected_names:
-        status = name_to_status.get(n, "<not-found>")
-        is_subif = "." in n
-        if status == "up":
+        st = name_to_status.get(n, "<not-found>")
+        if st == "up":
             results.ok(f"{n} oper-status = up")
-        elif is_subif and status == "lower-layer-down":
-            # Parent is fysiek down; sub-interface kan niet anders.
-            # Documenteer als skip, niet als fail.
-            print(f"  ⊘ {n} oper-status = lower-layer-down (parent down — skipped)")
+        elif "." in n and st == "lower-layer-down":
+            # Sub-interface kan niet up zonder parent carrier — geen failure.
+            results.info(f"{n} oper-status = lower-layer-down (parent down — skipped)")
         else:
-            results.fail(f"{n} oper-status = {status} (expected up)")
-
-def get_ospf_neighbors(m):
-    flt = """
-    <ospf-oper-data xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-ospf-oper"/>
-    """
-    reply = m.get(filter=("subtree", flt))
-    root = etree.fromstring(reply.xml.encode())
-    neighbors = []
-    for nbr in root.iter():
-        tag = etree.QName(nbr).localname
-        if tag in ("ospf-neighbor", "ospf-neighbor-list"):
-            state, nbr_id = None, None
-            for child in nbr.iter():
-                ctag = etree.QName(child).localname
-                if ctag == "state" and state is None:
-                    state = (child.text or "").strip()
-                if ctag in ("nbr-id", "neighbor-id") and nbr_id is None:
-                    nbr_id = (child.text or "").strip()
-            if state and nbr_id:
-                neighbors.append((nbr_id, state))
-    return neighbors
+            results.fail(f"{n} oper-status = {st} (expected up)")
 
 
-def check_ospf_and_reachability(m, expected_peer_router_ids, results):
-    try:
-        neighbors = get_ospf_neighbors(m)
-    except Exception as exc:
-        results.fail(f"could not fetch OSPF oper data: {exc}")
+def check_ospf_and_reachability(host, expected_peer_router_ids, results):
+    status, data = restconf_get(host, "Cisco-IOS-XE-ospf-oper:ospf-oper-data")
+    if status != 200:
+        results.fail(f"OSPF oper data: HTTP {status}")
         return
+
+    # Walk JSON recursively zoeken naar (nbr-id, state) paren.
+    neighbors = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            st = obj.get("state")
+            nid = obj.get("nbr-id") or obj.get("neighbor-id")
+            if st and nid:
+                neighbors.append((nid, st))
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(data)
 
     if not neighbors:
         results.fail("no OSPF neighbors found")
         return
 
-    full_neighbors = {nid for nid, st in neighbors if "full" in st.lower()}
+    full = {nid for nid, st in neighbors if "full" in str(st).lower()}
     details = ", ".join(f"{nid}={st}" for nid, st in neighbors)
-    results.ok(f"OSPF adjacencies up: {details}")
+    results.ok(f"OSPF adjacencies: {details}")
 
     for peer_rid in expected_peer_router_ids:
-        if peer_rid in full_neighbors:
+        if peer_rid in full:
             results.ok(f"peer {peer_rid} reachable (OSPF FULL)")
         else:
             results.fail(f"peer {peer_rid} NOT reachable (no FULL adjacency)")
 
 
-def check_default_gateway(m, expected_gw, results):
-    """Check that ip default-gateway is configured (switches in L2 mode)."""
-    flt = """
-    <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-      <ip>
-        <default-gateway/>
-      </ip>
-    </native>
-    """
-    try:
-        reply = m.get_config(source="running", filter=("subtree", flt))
-        root = etree.fromstring(reply.xml.encode())
-        gw = root.findtext(
-            ".//native:ip/native:default-gateway",
-            namespaces=NS,
-        )
+def check_default_gateway(host, expected_gw, results):
+    status, data = restconf_get(host, "Cisco-IOS-XE-native:native/ip/default-gateway")
+    if status == 200:
+        gw = data.get("Cisco-IOS-XE-native:default-gateway") if data else None
         if gw == expected_gw:
             results.ok(f"default-gateway = {gw}")
         else:
             results.fail(f"default-gateway mismatch: expected {expected_gw}, got {gw}")
-    except Exception as exc:
-        results.fail(f"could not read default-gateway: {exc}")
+    elif status == 404:
+        results.fail(f"default-gateway not configured (HTTP 404)")
+    else:
+        results.fail(f"default-gateway: HTTP {status}")
 
+
+# ─────────────────────────────────────────────────────────────
+# Per-device + main
+# ─────────────────────────────────────────────────────────────
 
 def verify_device(name, device, cfg, peers):
-    print(f"\n=== Verify {name} ({device['host']}) ===")
+    print(f"\n=== Verify {name} ({device['host']}) via RESTCONF ===")
     results = CheckResult()
 
-    # Bouw lijst van interface-namen die we verwachten up te zien
+    # Build de verwachte interface-namen
     expected_intf_names = []
     for intf in cfg.get("interfaces") or []:
         if intf.get("enabled", True) and not intf.get("no_ip", False):
-            # sub-interfaces met VLAN-encapsulatie: enabled hangt af van parent
             expected_intf_names.append(f"GigabitEthernet{intf['name']}")
     for lo in cfg.get("loopbacks") or []:
         expected_intf_names.append(f"Loopback{lo['name']}")
     for svi in cfg.get("svi_interfaces") or []:
         if svi.get("enabled", True):
             expected_intf_names.append(f"Vlan{svi['vlan']}")
-    # Switchports skip — die zijn L2, geen oper-status in ietf-interfaces dat
-    # van enabled-state afhangt voorbij carrier.
 
-    # Verwachte OSPF peer router-ids
+    # Verwachte OSPF peer router-ids (alle andere routers in inventory)
     expected_peers = []
     for peer_name, peer_cfg in peers.items():
         if peer_name == name:
@@ -205,14 +198,14 @@ def verify_device(name, device, cfg, peers):
             if rid:
                 expected_peers.append(rid)
 
-    with connect(device["host"], device["netconf_port"], USERNAME, PASSWORD) as m:
-        check_hostname(m, cfg["hostname"], results)
-        if expected_intf_names:
-            check_interfaces(m, expected_intf_names, results)
-        if cfg.get("ospf"):
-            check_ospf_and_reachability(m, expected_peers, results)
-        if cfg.get("default_gateway"):
-            check_default_gateway(m, cfg["default_gateway"], results)
+    host = device["host"]
+    check_hostname(host, cfg["hostname"], results)
+    if expected_intf_names:
+        check_interfaces(host, expected_intf_names, results)
+    if cfg.get("ospf"):
+        check_ospf_and_reachability(host, expected_peers, results)
+    if cfg.get("default_gateway"):
+        check_default_gateway(host, cfg["default_gateway"], results)
 
     print(f"\n  Result: {results.passed}/{results.total} passed")
     return results
@@ -227,7 +220,6 @@ def main():
         if cfg_path.exists():
             configs[name] = load_yaml(cfg_path)
 
-    # SW1 staat in inventory maar hardware is offline. We skippen die.
     skip_unreachable = {"SW1"}
 
     overall_failed = 0

@@ -63,5 +63,8 @@ exit
 netconf-yang
 netconf-yang feature candidate-datastore
 
+ip http secure-server
+restconf
+
 end
 write memory
