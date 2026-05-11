@@ -1,0 +1,67 @@
+! ============================================================
+! SW1 minimal bootstrap (Site A access switch)
+! VLAN 10 for clients, VLAN 99 for management.
+! Trunk to R1, access port for laptop, access ports for future clients.
+! ============================================================
+
+enable
+configure terminal
+
+hostname SW1
+
+! VLAN database
+vlan 10
+ name Site-A-Clients
+exit
+vlan 99
+ name Management
+exit
+
+! Mgmt SVI in VLAN 99
+interface Vlan99
+ description Management SVI
+ ip address 10.99.1.10 255.255.255.0
+ no shutdown
+exit
+
+ip default-gateway 10.99.1.1
+
+! Trunk to R1
+interface GigabitEthernet1/0/24
+ description Trunk to R1
+ switchport mode trunk
+ switchport trunk allowed vlan 10,99
+ no shutdown
+exit
+
+! Laptop access port
+interface GigabitEthernet1/0/2
+ description Laptop - VLAN 99
+ switchport mode access
+ switchport access vlan 99
+ no shutdown
+exit
+
+! Future client port
+interface GigabitEthernet1/0/1
+ description Client port - VLAN 10
+ switchport mode access
+ switchport access vlan 10
+ no shutdown
+exit
+
+! User + SSH + NETCONF
+username admin privilege 15 secret cisco123
+ip domain name lab.local
+crypto key generate rsa modulus 2048
+ip ssh version 2
+line vty 0 4
+ login local
+ transport input ssh
+exit
+
+netconf-yang
+netconf-yang feature candidate-datastore
+
+end
+write memory

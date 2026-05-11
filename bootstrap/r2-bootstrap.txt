@@ -1,10 +1,7 @@
 ! ============================================================
-! R2 minimal bootstrap - paste into console
-! Sets up enough OSPF to be reachable from the laptop via R1.
-! After this, deploy.py R2 will configure the rest.
-!
-! Prerequisite: R1 must already be bootstrapped, and the
-! R1<->R2 link cable must be in place (R1 Gi0/0/1 <-> R2 Gi0/0/1).
+! R2 minimal bootstrap (campus topology)
+! Mirror of R1 but for Site B. Configures sub-interfaces to SW2,
+! plus OSPF link to R1.
 ! ============================================================
 
 enable
@@ -12,8 +9,22 @@ configure terminal
 
 hostname R2
 
-interface Loopback0
- ip address 2.2.2.2 255.255.255.255
+interface GigabitEthernet0/0/0
+ description Trunk to SW2
+ no ip address
+ no shutdown
+exit
+
+interface GigabitEthernet0/0/0.99
+ description VLAN 99 Mgmt
+ encapsulation dot1Q 99
+ ip address 10.99.2.1 255.255.255.0
+exit
+
+interface GigabitEthernet0/0/0.20
+ description VLAN 20 Site-B Clients
+ encapsulation dot1Q 20
+ ip address 10.20.20.1 255.255.255.0
 exit
 
 interface GigabitEthernet0/0/1
@@ -22,11 +33,13 @@ interface GigabitEthernet0/0/1
  no shutdown
 exit
 
-username admin privilege 15 secret cisco123
+interface Loopback0
+ ip address 2.2.2.2 255.255.255.255
+exit
 
+username admin privilege 15 secret cisco123
 ip domain name lab.local
 crypto key generate rsa modulus 2048
-
 ip ssh version 2
 line vty 0 4
  login local
@@ -37,6 +50,8 @@ router ospf 1
  router-id 2.2.2.2
  network 2.2.2.2 0.0.0.0 area 0
  network 192.168.12.0 0.0.0.3 area 0
+ network 10.99.2.0 0.0.0.255 area 0
+ network 10.20.20.0 0.0.0.255 area 0
 exit
 
 netconf-yang

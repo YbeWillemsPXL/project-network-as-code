@@ -1,6 +1,7 @@
 ! ============================================================
-! R1 minimal bootstrap - paste into console
-! After this, deploy.py R1 will configure the rest.
+! R1 minimal bootstrap (campus topology)
+! Configures router-on-a-stick trunk toward SW1, plus OSPF link to R2.
+! After this, deploy.py R1 can take over for ongoing config.
 ! ============================================================
 
 enable
@@ -8,21 +9,55 @@ configure terminal
 
 hostname R1
 
+! Physical trunk to SW1 (no IP itself)
 interface GigabitEthernet0/0/0
- description Management
- ip address 192.168.100.1 255.255.255.0
+ description Trunk to SW1
+ no ip address
  no shutdown
 exit
 
-username admin privilege 15 secret cisco123
+! Sub-interface for VLAN 99 (management)
+interface GigabitEthernet0/0/0.99
+ description VLAN 99 Mgmt
+ encapsulation dot1Q 99
+ ip address 10.99.1.1 255.255.255.0
+exit
 
+! Sub-interface for VLAN 10 (Site A clients)
+interface GigabitEthernet0/0/0.10
+ description VLAN 10 Site-A Clients
+ encapsulation dot1Q 10
+ ip address 10.10.10.1 255.255.255.0
+exit
+
+! Routed link to R2
+interface GigabitEthernet0/0/1
+ description Link to R2
+ ip address 192.168.12.1 255.255.255.252
+ no shutdown
+exit
+
+interface Loopback0
+ ip address 1.1.1.1 255.255.255.255
+exit
+
+! User + SSH + NETCONF
+username admin privilege 15 secret cisco123
 ip domain name lab.local
 crypto key generate rsa modulus 2048
-
 ip ssh version 2
 line vty 0 4
  login local
  transport input ssh
+exit
+
+! OSPF
+router ospf 1
+ router-id 1.1.1.1
+ network 1.1.1.1 0.0.0.0 area 0
+ network 192.168.12.0 0.0.0.3 area 0
+ network 10.99.1.0 0.0.0.255 area 0
+ network 10.10.10.0 0.0.0.255 area 0
 exit
 
 netconf-yang
