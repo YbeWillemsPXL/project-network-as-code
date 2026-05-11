@@ -1,12 +1,23 @@
-# Welke toestellen zijn er en hoe bereiken we ze.
-# Geen wachtwoord/gebruiker hier — die komen uit .env (niet in Git).
+# Devices in the campus topology.
+# Hosts use management IPs reachable from the laptop.
+# Credentials (username/password) come from .env, not from this file.
 devices:
   R1:
-    host: 192.168.100.1
+    host: 1.1.1.1            # loopback, reachable via OSPF; survives any L2 change
     netconf_port: 830
     role: edge_router
 
   R2:
-    host: 2.2.2.2     # tijdelijk: management, totdat OSPF up is
+    host: 10.99.2.1          # VLAN 99 sub-interface, directly reachable via SW2
     netconf_port: 830
     role: edge_router
+
+  SW1:
+    host: 10.99.1.10         # SVI VLAN 99 — reachable when SW1 returns and R1 trunk comes up
+    netconf_port: 830
+    role: access_switch
+
+  SW2:
+    host: 10.99.2.10         # SVI VLAN 99 — directly reachable
+    netconf_port: 830
+    role: access_switch

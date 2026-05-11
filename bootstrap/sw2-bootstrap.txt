@@ -30,6 +30,14 @@ interface GigabitEthernet1/0/24
  no shutdown
 exit
 
+! Laptop access port (used while SW1 is unavailable)
+interface GigabitEthernet1/0/2
+ description Laptop - VLAN 99
+ switchport mode access
+ switchport access vlan 99
+ no shutdown
+exit
+
 interface GigabitEthernet1/0/1
  description Client port - VLAN 20
  switchport mode access

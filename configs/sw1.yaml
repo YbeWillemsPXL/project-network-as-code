@@ -1,0 +1,35 @@
+hostname: SW1
+
+#vlans:
+#  - id: 10
+#    name: "Site-A-Clients"
+#  - id: 99
+#    name: "Management"
+
+svi_interfaces:
+  - vlan: 99
+    description: "Management SVI"
+    ip: "10.99.1.10"
+    mask: "255.255.255.0"
+    enabled: true
+
+default_gateway: "10.99.1.1"
+
+switchports:
+  - name: "1/0/24"
+    description: "Trunk to R1"
+    mode: "trunk"
+    trunk_allowed_vlans: [10, 99]
+    enabled: true
+
+  - name: "1/0/2"
+    description: "Laptop - VLAN 99"
+    mode: "access"
+    access_vlan: 99
+    enabled: true
+
+  - name: "1/0/1"
+    description: "Client port - VLAN 10"
+    mode: "access"
+    access_vlan: 10
+    enabled: true
